@@ -29,16 +29,16 @@ object PhotoPipeline {
         ctx: Context,
         raw: File,
         digital: Float,
-        ai: Boolean,
         token: String,
+        s: Settings,
         report: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val bmp = cropAndRotate(raw, digital)
-            save(ctx, bmp, "AIZoom_$stamp.jpg")
+            save(ctx, bmp, "AIZoom_$stamp.jpg", s.jpegQuality)
 
-            if (!ai || digital < 1.5f) {
+            if (!s.aiEnabled || digital < s.aiMinZoom) {
                 report("Saved")
                 return@withContext
             }
@@ -49,17 +49,18 @@ object PhotoPipeline {
 
             report("Enhancing")
             val longSide = max(bmp.width, bmp.height)
-            val toSend = if (longSide > 2000) {
-                val f = 2000f / longSide
+            val scale = if (s.aiScale > 0) s.aiScale else if (longSide <= 700) 4 else 2
+            val maxSend = 4000 / scale
+            val toSend = if (longSide > maxSend) {
+                val f = maxSend.toFloat() / longSide
                 Bitmap.createScaledBitmap(bmp, (bmp.width * f).toInt(), (bmp.height * f).toInt(), true)
             } else bmp
-            val scale = if (max(toSend.width, toSend.height) <= 700) 4 else 2
 
             val out = ByteArrayOutputStream()
             toSend.compress(Bitmap.CompressFormat.JPEG, 95, out)
             val enhanced = Enhancer(token).enhance(out.toByteArray(), scale)
             val result = BitmapFactory.decodeByteArray(enhanced, 0, enhanced.size)
-            save(ctx, result, "AIZoom_${stamp}_AI.jpg")
+            save(ctx, result, "AIZoom_${stamp}_AI.jpg", s.jpegQuality)
             report("Saved original and enhanced")
         } catch (e: Exception) {
             report("Error: ${e.message}")
@@ -93,7 +94,7 @@ object PhotoPipeline {
         return Bitmap.createBitmap(region, 0, 0, region.width, region.height, m, true)
     }
 
-    private fun save(ctx: Context, bmp: Bitmap, name: String) {
+    private fun save(ctx: Context, bmp: Bitmap, name: String, quality: Int) {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -102,7 +103,7 @@ object PhotoPipeline {
         val uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("Cannot create file")
         ctx.contentResolver.openOutputStream(uri)!!.use {
-            bmp.compress(Bitmap.CompressFormat.JPEG, 95, it)
+            bmp.compress(Bitmap.CompressFormat.JPEG, quality, it)
         }
     }
 }
