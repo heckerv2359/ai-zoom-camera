@@ -21,7 +21,20 @@ jobs:
           gradle-version: 8.9
 
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          {
+            echo '### Build errors'
+            echo '```'
+            grep -E '^(e: |.*error:|.*FAILED|\* What went wrong)' -A4 build.log | head -150
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^e: ' build.log | head -20 | while read -r line; do echo "::error::${line}"; done
 
       - uses: actions/upload-artifact@v4
         with:
