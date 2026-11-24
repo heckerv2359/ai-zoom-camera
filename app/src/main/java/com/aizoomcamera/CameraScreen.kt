@@ -120,7 +120,7 @@ fun CameraScreen() {
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .build()
     }
-    val videoCapture = remember(settings.videoQuality, settings.stabilization) {
+    val videoCapture = remember(settings.videoQuality) {
         val quality = when (settings.videoQuality) {
             "UHD" -> Quality.UHD
             "HD" -> Quality.HD
@@ -131,9 +131,7 @@ fun CameraScreen() {
                 QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(Quality.SD))
             )
             .build()
-        VideoCapture.Builder(recorder)
-            .setVideoStabilizationEnabled(settings.stabilization)
-            .build()
+        VideoCapture.withOutput(recorder)
     }
 
     val maxUi = (if (videoMode) min(MAX_VIDEO_ZOOM, hwMax) else MAX_PHOTO_ZOOM).coerceAtLeast(1.01f)
@@ -231,7 +229,8 @@ fun CameraScreen() {
     }
 
     LaunchedEffect(
-        camera, settings.manual, settings.iso, settings.shutterDenom, settings.exposureIndex, expMin, expMax
+        camera, videoMode, settings.stabilization, settings.manual,
+        settings.iso, settings.shutterDenom, settings.exposureIndex, expMin, expMax
     ) {
         val cam = camera ?: return@LaunchedEffect
         if (expMax > expMin) {
@@ -243,6 +242,12 @@ fun CameraScreen() {
             options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             options.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, settings.iso.coerceIn(isoLo, isoHi))
             options.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, ns)
+        }
+        if (videoMode && settings.stabilization) {
+            options.setCaptureRequestOption(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
         }
         Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(options.build())
     }
@@ -279,14 +284,14 @@ fun CameraScreen() {
             put(MediaStore.Video.Media.DISPLAY_NAME, "AIZoom_${System.currentTimeMillis()}")
             put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/AIZoomCamera")
         }
-        val options = MediaStoreOutputOptions.Builder(
+        val outputOptions = MediaStoreOutputOptions.Builder(
             ctx.contentResolver,
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         ).setContentValues(values).build()
 
         val hasAudio = ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        var pending = videoCapture.output.prepareRecording(ctx, options)
+        var pending = videoCapture.output.prepareRecording(ctx, outputOptions)
         if (hasAudio) pending = pending.withAudioEnabled()
 
         status = "Recording"
