@@ -7,6 +7,7 @@ Android camera app built with Kotlin, Jetpack Compose and CameraX.
 - Photo zoom from 1x to 100x
 - Video zoom from 1x to 30x
 - AI detail enhancement through the Replicate API using Real-ESRGAN with face redraw turned off
+- On device enhancement that takes over when there is no API token or the API call fails
 - The original capture is always saved. The enhanced copy is saved next to it with an _AI suffix
 - Files go to Pictures/AIZoomCamera and Movies/AIZoomCamera
 - XML config import and export in the same format LMC uses
@@ -14,9 +15,17 @@ Android camera app built with Kotlin, Jetpack Compose and CameraX.
 
 ## How the zoom works
 
-The camera hardware zooms up to the limit the phone reports. Anything beyond that on photos is a centre crop, and the AI model rebuilds the lost detail. Video uses hardware zoom only, so the top video zoom is the smaller of 30x and what the phone allows.
+The camera hardware zooms up to the limit the phone reports. Anything beyond that on photos is a centre crop, and the enhancer works on that crop. Video uses hardware zoom only, so the top video zoom is the smaller of 30x and what the phone allows.
 
-AI enhancement only runs when the crop reaches the AI start value, 1.5x by default, because below that no detail was lost.
+Enhancement only runs when the crop reaches the AI start value, 1.5x by default, because below that no detail was lost.
+
+## Enhancement engines
+
+With an API token saved, the Replicate model does the work. It can rebuild detail that the crop lost.
+
+Without a token, or when the API fails or the phone is offline, the app uses its own on device engine. It upscales the crop and sharpens only the brightness channel, with a noise floor so grain is not boosted. Colours are untouched. It runs on the phone with no network and no cost, but it only makes existing detail clearer and cannot invent new detail. The status line says whether the result came from the API or the device.
+
+On device output is capped at about 10 megapixels to protect memory.
 
 ## XML configs
 
@@ -29,8 +38,8 @@ Every entry from an imported file is kept and exported again unchanged, includin
 | Key | Type | Meaning |
 | --- | --- | --- |
 | aizoom_grid | boolean | Show the thirds grid |
-| aizoom_ai_enabled | boolean | Run AI enhancement |
-| aizoom_ai_min_zoom | float | Crop factor where AI starts, 1 to 10 |
+| aizoom_ai_enabled | boolean | Run enhancement |
+| aizoom_ai_min_zoom | float | Crop factor where enhancement starts, 1 to 10 |
 | aizoom_ai_scale | int | 0 for auto, or 2 or 4 |
 | aizoom_jpeg_quality | int | 50 to 100 |
 | aizoom_video_quality | string | HD, FHD or UHD |
@@ -43,6 +52,5 @@ Every entry from an imported file is kept and exported again unchanged, includin
 
 ## Setup
 
-1. Create a token at replicate.com and open the app.
-2. Open Settings, tap API token and paste it. It is stored encrypted on the device.
-3. Push to main. GitHub Actions builds the APK and attaches it as the ai-zoom-camera-debug artifact in the Actions tab.
+1. Optional, for the API engine: create a token at replicate.com, open Settings in the app, tap API token and paste it. It is stored encrypted on the device.
+2. Push to main. GitHub Actions builds the APK and attaches it as the ai-zoom-camera-debug artifact in the Actions tab.
