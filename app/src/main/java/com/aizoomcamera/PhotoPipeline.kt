@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
 import android.graphics.Matrix
 import android.graphics.Rect
+import android.net.Uri
 import android.provider.MediaStore
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
@@ -36,12 +37,13 @@ object PhotoPipeline {
         digital: Float,
         token: String,
         s: Settings,
+        onSaved: (Uri) -> Unit,
         report: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val bmp = cropAndRotate(raw, digital)
-            save(ctx, bmp, "AIZoom_$stamp.jpg", s.jpegQuality)
+            onSaved(save(ctx, bmp, "AIZoom_$stamp.jpg", s.jpegQuality))
 
             if (!s.aiEnabled || digital < s.aiMinZoom) {
                 report("Saved")
@@ -66,7 +68,7 @@ object PhotoPipeline {
                 }
             }
 
-            save(ctx, result, "AIZoom_${stamp}_AI.jpg", s.jpegQuality)
+            onSaved(save(ctx, result, "AIZoom_${stamp}_AI.jpg", s.jpegQuality))
             report(if (onDevice) "Saved original and enhanced on device" else "Saved original and enhanced")
         } catch (e: Exception) {
             report("Error: ${e.message}")
@@ -115,7 +117,7 @@ object PhotoPipeline {
         return Bitmap.createBitmap(region, 0, 0, region.width, region.height, m, true)
     }
 
-    private fun save(ctx: Context, bmp: Bitmap, name: String, quality: Int) {
+    private fun save(ctx: Context, bmp: Bitmap, name: String, quality: Int): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -126,5 +128,6 @@ object PhotoPipeline {
         ctx.contentResolver.openOutputStream(uri)!!.use {
             bmp.compress(Bitmap.CompressFormat.JPEG, quality, it)
         }
+        return uri
     }
 }

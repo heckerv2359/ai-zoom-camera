@@ -2,18 +2,22 @@ package com.aizoomcamera
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.provider.MediaStore
+import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -30,18 +34,24 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -62,10 +72,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -107,6 +122,12 @@ fun CameraScreen() {
     var showSettings by remember { mutableStateOf(false) }
     var apiKey by remember { mutableStateOf(Keys.load(ctx)) }
 
+    var flash by remember { mutableIntStateOf(0) }
+    var hasFlash by remember { mutableStateOf(false) }
+    var ratio by remember { mutableStateOf("4:3") }
+    var lastUri by remember { mutableStateOf<Uri?>(null) }
+    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
+
     var expMin by remember { mutableIntStateOf(0) }
     var expMax by remember { mutableIntStateOf(0) }
     var isoLo by remember { mutableIntStateOf(50) }
@@ -114,10 +135,14 @@ fun CameraScreen() {
     var shutterLoNs by remember { mutableStateOf(10_000L) }
     var shutterHiNs by remember { mutableStateOf(1_000_000_000L) }
 
+    val aspect = if (ratio == "16:9") AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+    val viewRatio = if (videoMode || ratio == "16:9") 9f / 16f else 3f / 4f
+
     val previewView = remember { PreviewView(ctx) }
-    val imageCapture = remember {
+    val imageCapture = remember(aspect) {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setTargetAspectRatio(aspect)
             .build()
     }
     val videoCapture = remember(settings.videoQuality) {
@@ -172,6 +197,19 @@ fun CameraScreen() {
         }
     }
 
+    fun openLast() {
+        val u = lastUri ?: return
+        try {
+            ctx.startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(u, "image/*")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            )
+        } catch (e: Exception) {
+            status = "No gallery app found"
+        }
+    }
+
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? -> if (uri != null) importConfig(uri) }
@@ -185,14 +223,49 @@ fun CameraScreen() {
         store.save()
     }
 
-    LaunchedEffect(videoMode, videoCapture) {
+    // Show the newest photo this app saved before, so the thumbnail is not empty on launch.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                ctx.contentResolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    arrayOf(MediaStore.Images.Media._ID),
+                    "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?",
+                    arrayOf("Pictures/AIZoomCamera%"),
+                    "${MediaStore.Images.Media.DATE_ADDED} DESC"
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        lastUri = ContentUris.withAppendedId(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0)
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                // No previous photos or no access, the thumbnail just stays empty.
+            }
+        }
+    }
+
+    LaunchedEffect(lastUri) {
+        val u = lastUri
+        thumb = if (u == null) null else withContext(Dispatchers.IO) {
+            try {
+                ctx.contentResolver.loadThumbnail(u, Size(256, 256), null).asImageBitmap()
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    LaunchedEffect(videoMode, videoCapture, imageCapture) {
         val future = ProcessCameraProvider.getInstance(ctx)
         future.addListener({
             try {
                 val provider = future.get()
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
+                val preview = Preview.Builder()
+                    .setTargetAspectRatio(if (videoMode) AspectRatio.RATIO_16_9 else aspect)
+                    .build()
+                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 provider.unbindAll()
                 val cam = provider.bindToLifecycle(
                     owner,
@@ -201,6 +274,7 @@ fun CameraScreen() {
                     if (videoMode) videoCapture else imageCapture
                 )
                 hwMax = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+                hasFlash = cam.cameraInfo.hasFlashUnit()
 
                 val expRange = cam.cameraInfo.exposureState.exposureCompensationRange
                 expMin = expRange.lower
@@ -226,6 +300,16 @@ fun CameraScreen() {
 
     LaunchedEffect(zoom, camera, hwMax) {
         camera?.cameraControl?.setZoomRatio(min(zoom, hwMax))
+    }
+
+    LaunchedEffect(camera, flash, videoMode, imageCapture) {
+        imageCapture.flashMode = when (flash) {
+            1 -> ImageCapture.FLASH_MODE_AUTO
+            2 -> ImageCapture.FLASH_MODE_ON
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
+        // In video mode the flash button works as a torch.
+        camera?.cameraControl?.enableTorch(videoMode && flash == 2)
     }
 
     LaunchedEffect(
@@ -263,7 +347,9 @@ fun CameraScreen() {
             mainExec,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    scope.launch { PhotoPipeline.process(ctx, file, d, key, s) { status = it } }
+                    scope.launch {
+                        PhotoPipeline.process(ctx, file, d, key, s, { lastUri = it }) { status = it }
+                    }
                 }
 
                 override fun onError(e: ImageCaptureException) {
@@ -307,30 +393,96 @@ fun CameraScreen() {
         Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .pointerInput(maxUi) {
+                detectTransformGestures { _, _, zoomChange, _ ->
+                    zoom = (zoom * zoomChange).coerceIn(1f, maxUi)
+                }
+            }
             .pointerInput(settings.doubleTapImport) {
                 detectTapGestures(onDoubleTap = {
                     if (settings.doubleTapImport) importLauncher.launch(arrayOf("*/*"))
                 })
             }
     ) {
-        AndroidView(
-            factory = { previewView },
-            modifier = Modifier.fillMaxSize().graphicsLayer {
-                scaleX = digital
-                scaleY = digital
-            }
-        )
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .aspectRatio(viewRatio)
+                .clipToBounds()
+        ) {
+            AndroidView(
+                factory = { previewView },
+                modifier = Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = digital
+                    scaleY = digital
+                }
+            )
 
-        if (settings.grid) {
-            Canvas(Modifier.fillMaxSize()) {
-                val line = Color(0x88FFFFFF)
-                for (i in 1..2) {
-                    val x = size.width * i / 3
-                    val y = size.height * i / 3
-                    drawLine(line, Offset(x, 0f), Offset(x, size.height), 2f)
-                    drawLine(line, Offset(0f, y), Offset(size.width, y), 2f)
+            if (settings.grid) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val line = Color(0x88FFFFFF)
+                    for (i in 1..2) {
+                        val x = size.width * i / 3
+                        val y = size.height * i / 3
+                        drawLine(line, Offset(x, 0f), Offset(x, size.height), 2f)
+                        drawLine(line, Offset(0f, y), Offset(size.width, y), 2f)
+                    }
                 }
             }
+        }
+
+        Row(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (hasFlash) {
+                FilterChip(
+                    selected = flash != 0,
+                    onClick = { flash = (flash + 1) % 3 },
+                    label = {
+                        Text(
+                            when (flash) {
+                                1 -> "Flash auto"
+                                2 -> "Flash on"
+                                else -> "Flash off"
+                            }
+                        )
+                    }
+                )
+            }
+            FilterChip(
+                selected = settings.grid,
+                onClick = { change(settings.copy(grid = !settings.grid)) },
+                label = { Text("Grid") }
+            )
+            if (!videoMode) {
+                FilterChip(
+                    selected = false,
+                    onClick = { ratio = if (ratio == "4:3") "16:9" else "4:3" },
+                    label = { Text(ratio) }
+                )
+                FilterChip(
+                    selected = settings.aiEnabled,
+                    onClick = { change(settings.copy(aiEnabled = !settings.aiEnabled)) },
+                    label = { Text("HD") }
+                )
+            } else {
+                FilterChip(
+                    selected = true,
+                    onClick = {
+                        val next = when (settings.videoQuality) {
+                            "HD" -> "FHD"
+                            "FHD" -> "UHD"
+                            else -> "HD"
+                        }
+                        change(settings.copy(videoQuality = next))
+                    },
+                    label = { Text(settings.videoQuality) }
+                )
+            }
+            TextButton(onClick = { showSettings = true }) { Text("More") }
         }
 
         Column(
@@ -357,17 +509,35 @@ fun CameraScreen() {
                     onClick = { videoMode = true },
                     label = { Text("Video") }
                 )
-                TextButton(onClick = { showSettings = true }) { Text("Settings") }
             }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = { if (videoMode) toggleRecord() else takePhoto() }) {
-                Text(
-                    when {
-                        !videoMode -> "Capture"
-                        recording != null -> "Stop"
-                        else -> "Record"
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    val t = thumb
+                    if (t != null) {
+                        Image(
+                            bitmap = t,
+                            contentDescription = "Last photo",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { openLast() }
+                        )
+                    } else {
+                        Spacer(Modifier.size(56.dp))
                     }
-                )
+                }
+                Button(onClick = { if (videoMode) toggleRecord() else takePhoto() }) {
+                    Text(
+                        when {
+                            !videoMode -> "Capture"
+                            recording != null -> "Stop"
+                            else -> "Record"
+                        }
+                    )
+                }
+                Spacer(Modifier.weight(1f))
             }
         }
 
