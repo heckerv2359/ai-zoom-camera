@@ -3,6 +3,7 @@ package com.aizoomcamera
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -23,6 +24,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (KeyBus.handler?.invoke(keyCode, event.repeatCount) == true) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {

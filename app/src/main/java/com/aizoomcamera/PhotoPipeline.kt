@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
 import android.graphics.Matrix
 import android.graphics.Rect
+import android.location.Location
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.exifinterface.media.ExifInterface
@@ -20,16 +21,14 @@ import java.util.Locale
 import kotlin.math.max
 
 /**
- * Takes the raw capture, applies the digital part of the zoom as a centre crop,
- * saves the untouched crop, then optionally saves an enhanced copy next to it.
- * The original is never overwritten.
+ * Takes the raw capture, applies the digital part of the zoom as a centre crop and saves the
+ * untouched crop. When enhancement or a look setting is on, it saves a second edited copy next to
+ * it. The original is never overwritten.
  *
  * Enhancement uses the API when a token is set. With no token, or if the API call fails,
  * it runs on the device instead.
  */
 object PhotoPipeline {
-
-    private const val DEVICE_SHARPEN = 0.6f
 
     suspend fun process(
         ctx: Context,
@@ -37,39 +36,54 @@ object PhotoPipeline {
         digital: Float,
         token: String,
         s: Settings,
+        mirror: Boolean,
+        loc: Location?,
         onSaved: (Uri) -> Unit,
         report: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val bmp = cropAndRotate(raw, digital)
-            onSaved(save(ctx, bmp, "AIZoom_$stamp.jpg", s.jpegQuality))
+            val bmp = cropAndRotate(raw, digital, mirror)
+            onSaved(save(ctx, bmp, "${s.filePrefix}_$stamp.jpg", s.jpegQuality, loc))
 
-            if (!s.aiEnabled || digital < s.aiMinZoom) {
+            val enhance = s.aiEnabled && digital >= s.aiMinZoom
+            val look = Look.isActive(s)
+            if (!enhance && !look) {
                 report("Saved")
                 return@withContext
             }
 
-            val longSide = max(bmp.width, bmp.height)
-            val scale = if (s.aiScale > 0) s.aiScale else if (longSide <= 700) 4 else 2
-
-            var onDevice = token.isBlank()
-            val result: Bitmap = if (onDevice) {
-                report("Enhancing on device")
-                LocalEnhancer.enhance(bmp, scale, DEVICE_SHARPEN)
-            } else {
-                report("Enhancing with API")
-                try {
-                    viaApi(bmp, scale, token)
-                } catch (e: Exception) {
-                    onDevice = true
-                    report("API failed, enhancing on device")
-                    LocalEnhancer.enhance(bmp, scale, DEVICE_SHARPEN)
+            var onDevice = true
+            var result: Bitmap = bmp
+            if (enhance) {
+                val longSide = max(bmp.width, bmp.height)
+                val scale = if (s.aiScale > 0) s.aiScale else if (longSide <= 700) 4 else 2
+                if (token.isBlank()) {
+                    report("Enhancing on device")
+                    result = LocalEnhancer.enhance(bmp, scale, s.sharpness)
+                } else {
+                    report("Enhancing with API")
+                    onDevice = false
+                    result = try {
+                        viaApi(bmp, scale, token)
+                    } catch (e: Exception) {
+                        onDevice = true
+                        report("API failed, enhancing on device")
+                        LocalEnhancer.enhance(bmp, scale, s.sharpness)
+                    }
                 }
             }
+            if (look) result = Look.apply(result, s)
 
-            onSaved(save(ctx, result, "AIZoom_${stamp}_AI.jpg", s.jpegQuality))
-            report(if (onDevice) "Saved original and enhanced on device" else "Saved original and enhanced")
+            val suffix = if (enhance) "AI" else "LOOK"
+            onSaved(save(ctx, result, "${s.filePrefix}_${stamp}_$suffix.jpg", s.jpegQuality, loc))
+            report(
+                when {
+                    !enhance -> "Saved original and edited copy"
+                    onDevice -> "Saved original and enhanced on device"
+                    else -> "Saved original and enhanced"
+                }
+            )
         } catch (e: Exception) {
             report("Error: ${e.message}")
         } finally {
@@ -93,7 +107,7 @@ object PhotoPipeline {
     }
 
     @Suppress("DEPRECATION")
-    private fun cropAndRotate(raw: File, digital: Float): Bitmap {
+    private fun cropAndRotate(raw: File, digital: Float, mirror: Boolean): Bitmap {
         val orientation = ExifInterface(raw.path)
             .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
         val degrees = when (orientation) {
@@ -112,12 +126,14 @@ object PhotoPipeline {
         val region = decoder.decodeRegion(rect, BitmapFactory.Options())
         decoder.recycle()
 
-        if (degrees == 0f) return region
-        val m = Matrix().apply { postRotate(degrees) }
+        val m = Matrix()
+        if (degrees != 0f) m.postRotate(degrees)
+        if (mirror) m.postScale(-1f, 1f)
+        if (m.isIdentity) return region
         return Bitmap.createBitmap(region, 0, 0, region.width, region.height, m, true)
     }
 
-    private fun save(ctx: Context, bmp: Bitmap, name: String, quality: Int): Uri {
+    private fun save(ctx: Context, bmp: Bitmap, name: String, quality: Int, loc: Location?): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -128,6 +144,19 @@ object PhotoPipeline {
         ctx.contentResolver.openOutputStream(uri)!!.use {
             bmp.compress(Bitmap.CompressFormat.JPEG, quality, it)
         }
+        if (loc != null) writeGps(ctx, uri, loc)
         return uri
+    }
+
+    private fun writeGps(ctx: Context, uri: Uri, loc: Location) {
+        try {
+            ctx.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                exif.setLatLong(loc.latitude, loc.longitude)
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            // The photo is already saved, the location tag is a bonus.
+        }
     }
 }
